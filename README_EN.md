@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests Passing](https://img.shields.io/badge/Tests-176%20Passed%20(100%25)-success.svg)](https://github.com/Erfix404/hermes-astrology)
+[![CI](https://github.com/opticblu/hermes-astrology/actions/workflows/ci.yml/badge.svg)](https://github.com/opticblu/hermes-astrology/actions/workflows/ci.yml)
 [![Ephemeris: NASA JPL / SwissEph](https://img.shields.io/badge/Ephemeris-JPL%20%7C%20SwissEph-purple.svg)](https://www.astro.com/swisseph/)
 
 **Astraea — The Ultimate Deterministic Multi-Tradition Celestial Intelligence Engine & AI-Agent Backend**  
@@ -60,9 +60,13 @@ Unlike standard LLM chatbots that hallucinate planetary positions, Astraea compu
 
 ### Installation & Cloning
 ```bash
-git clone https://github.com/Erfix404/hermes-astrology.git
+git clone https://github.com/opticblu/hermes-astrology.git
 cd hermes-astrology
 ```
+
+For Swiss Ephemeris, install `pyswisseph==2.10.3.2` in the Python environment that launches the CLI, MCP or API. Otherwise the engine uses its built-in calculator. Check `_meta.engine_backend` in the result. Each Western and Vedic natal chart reports its zodiac and the house system actually used, including whole-sign fallback for polar locations.
+
+When a birth time is unknown, omit the hour or set `time_known: false`. Provide the birthplace’s IANA timezone for the local civil date. On a Moon ingress day the reading returns both possible signs. Houses, the rising sign and the BaZi hour pillar require a known clock time.
 
 ### CLI Execution
 ```bash
@@ -75,9 +79,30 @@ python scripts/astro_engine.py --json '{"lat":35.6892,"lng":51.3890,"mode":"find
 # Evaluate Bitcoin market astro-weather
 python scripts/astro_engine.py --json '{"mode":"crypto","asset":"BTC"}'
 
-# Run test suite (176 unit tests)
+# Run the full test suite
 python -m unittest discover tests
 ```
+
+### Birth details in shared deployments
+
+Supply birth details with each chart request. For `POST /interact`, include `profile` on every call. The optional `session_id` correlates replies. MCP offers chart calculations on demand. Older versions saved named profiles in `~/.astro_profiles.json` or an `ASTRO_PROFILE_DIR` directory. This release leaves those files on disk for their owner to handle. Chat clients may retain their own message history.
+
+### Historical price backtest
+
+Keep the daily price file on local disk and set `ASTRO_MARKET_DATA_DIR` to its
+directory. For BTC, download the [Coin Metrics daily BTC CSV](https://github.com/coinmetrics/data/blob/master/csv/btc.csv)
+as `btc.csv`. The calculator reads the `time` and `PriceUSD` columns, skips
+rows without a price and makes no network requests. Existing
+`book/trading_sources/<ticker>_authentic_history.json` and
+`<ticker>_daily_history.json` files remain supported.
+
+```sh
+ASTRO_MARKET_DATA_DIR=/path/to/prices python scripts/astro_cli.py --mode run_backtest --json '{"asset":"BTC","start_year":2020}'
+```
+
+Results are historical simulations. A signal uses the closing data for its
+date, enters at the next available close and exits 14 bars after entry. Profit
+factor is null when there are no losing trades.
 
 ### Python API Integration
 ```python

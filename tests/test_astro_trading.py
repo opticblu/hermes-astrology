@@ -5,7 +5,10 @@ import os
 import sys
 import unittest
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 _SCRIPTS = os.path.join(os.path.dirname(__file__), "..", "scripts")
 sys.path.insert(0, _SCRIPTS)
@@ -473,12 +476,39 @@ class TestCowanSBCMusicalAndSimulationSuite(unittest.TestCase):
         self.assertIn("annualized_sharpe_ratio", sim)
 
     def test_astraea_quant_trading_api_backtest(self):
-        bt_res = ate.AstraeaQuantTradingAPI.run_historical_backtest("BTC")
-        self.assertEqual(bt_res["asset"], "BTC")
-        self.assertEqual(bt_res["verification_status"], "AUDITED_AND_REPRODUCIBLE")
-        self.assertIn("performance_metrics", bt_res)
-        self.assertGreater(bt_res["total_bars_evaluated"], 100)
-        self.assertGreaterEqual(bt_res["performance_metrics"]["profit_factor"], 2.0)
+        start = datetime(2020, 1, 1)
+        signal_jd = ae.julian_day(start + timedelta(days=49))
+
+        def longitude_at(jd):
+            phase = 5 if jd == signal_jd else 350
+            return {"Sun": 0, "Moon": phase}, {"Mercury": 1}, "fixture"
+
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, ASTRO_MARKET_DATA_DIR=tmp):
+            days = [(start + timedelta(days=i)).date().isoformat() for i in range(65)]
+            # Synthetic daily prices; include an unpriced row before the series.
+            csv_data = "time,PriceUSD\n2019-12-31,\n" + "".join(
+                f"{day},{100 + i}\n" for i, day in enumerate(days))
+            Path(tmp, "btc.csv").write_text(csv_data, encoding="utf-8")
+            with patch.object(ae, "body_longitudes", side_effect=longitude_at):
+                result = ae.calculate_full_profile({"mode": "run_backtest", "asset": "BTC"})
+            bt = result["historical_astro_backtest"]
+            self.assertEqual(bt["total_bars_evaluated"], 65)
+            self.assertEqual(bt["verification_status"], "SIMULATED")
+            self.assertEqual(bt["sample_verified_trades"], [{
+                "signal_date": days[49], "date": days[50], "exit_date": days[64],
+                "entry": 150, "exit": 164, "type": "LONG", "return_pct": 9.28}])
+            self.assertIsNone(bt["performance_metrics"]["profit_factor"])  # no losses
+            late = ae.calculate_full_profile({"mode": "run_backtest", "asset": "BTC", "start_year": 2021})
+            self.assertIn("2021", late["historical_astro_backtest"]["error"])
+
+    def test_backtest_missing_and_invalid_local_data(self):
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, ASTRO_MARKET_DATA_DIR=tmp):
+            run = ate.AstraeaQuantTradingAPI.run_historical_backtest
+            self.assertIn("ASTRO_MARKET_DATA_DIR", run("BTC")["error"])
+            path = Path(tmp, "btc.csv")
+            path.write_text("time,PriceUSD\n2020-01-01,NaN\n", encoding="utf-8")
+            self.assertIn("finite", run("BTC")["error"])
+            self.assertIn("ticker", run("../BTC")["error"])
 
     def test_astraea_quant_trading_api_decisive_signal(self):
         t_lons = {"Sun": 160.0, "Moon": 162.0, "Mars": 283.57, "Jupiter": 120.0, "Saturn": 10.0, "Uranus": 60.0, "Neptune": 0.0, "Pluto": 300.0, "North Node": 92.0}

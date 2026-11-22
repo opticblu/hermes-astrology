@@ -52,7 +52,6 @@ Three living traditions: **Western tropical**, **Vedic / Jyotisha** (sidereal),
 5. FILL template with engine output (never guessed numbers)
 6. SYNTHESISE — hold contradictions; find the central paradox
 7. COUNSEL — answer the real human question; give agency, never doom
-8. OFFER to save the profile for future instant readings
 ```
 
 **Never skip step 1 or 3.** If describing a chart you didn't compute → stop.
@@ -72,12 +71,12 @@ Never take today's date from memory, prior conversation, or intuition — always
 | Field | Why | If missing |
 |-------|-----|-----------|
 | **Date** (Y/M/D) | Everything | **Required** — ask |
-| **Time** (H:M) | Rising, houses, Moon°, BaZi hour pillar | Use `time_known:false` (Sun-sign level) |
+| **Time** (H:M) | Rising sign, houses, exact Moon degree, BaZi hour pillar | Omit the hour and set `time_known:false`. Read the placements available for the local birth date. |
 | **Place** (city) | Ascendant, houses, tz | Ask; supply lat/lng/tz for known cities |
 | **Timezone** | Correct UTC conversion | Infer from place (IANA name, e.g. `Asia/Tehran`) |
 | **Gender** | BaZi luck-pillar direction only | Optional; omit if unknown |
 
-Check memory first before re-asking. Batch questions — don't interrogate.
+Use the details supplied by the requester for this reading. Ask for any missing fields together.
 
 ### 2 — Run the engine
 
@@ -162,7 +161,9 @@ python3 "${SKILL_DIR%%/SKILL.md}/scripts/daily-astrology-fetch.py"
 
 | Mode | Extra params | What it does |
 
-The engine returns `_meta.engine_backend` (`builtin` or `swisseph`). Builtin is exact to sign/house/nakshatra/dasha. For arcsecond/Placidus → `pip install pyswisseph`.
+For a chart reading, identify the zodiac and house system returned by the calculation. Western charts use the tropical zodiac. Vedic charts use the Lahiri sidereal zodiac and whole-sign houses. In a mixed reading label each tradition separately. For BaZi, name the Chinese pillars being read.
+
+The engine prefers Swiss Ephemeris when available (`python -m pip install pyswisseph==2.10.3.2`). Check `_meta.engine_backend` and the chart’s `house_system` for the actual result. With unknown birth time, omit rising signs, houses, and the hour pillar even if a template asks for them. If a planet has `possible_signs`, give both possibilities and explain why the time matters.
 
 ### 3 — Ground interpretation
 
@@ -215,9 +216,9 @@ Ground every answer in the engine's real math, but **adapt your delivery tone** 
 - 🔴 **Level 3: Professional / Astrologer ("تحلیل فنی / با درجات"):**
   - Provide exact degrees, minutes of arc, orbs, Shadbala virupas, house lords, and classical textual citations.
 
-### 7 — Remember
+### Birth details in shared chats
 
-Offer to save birth profile after a real reading. Save to memory or local file.
+Use birth details only for the requested reading. In a group, ask the requester to provide their own details or continue in a private chat. For a future reading, ask for the details again. Never search chat history, saved profiles or agent memory for someone’s birth details, or write them to memory or files.
 
 ---
 

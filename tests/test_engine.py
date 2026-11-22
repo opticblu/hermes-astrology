@@ -2,6 +2,7 @@
 """Tests for hermes-astrology engine. Zero deps — stdlib unittest only."""
 import json, os, sys, unittest
 from datetime import datetime
+from unittest.mock import patch
 
 _SCRIPTS = os.path.join(os.path.dirname(__file__), "..", "scripts")
 sys.path.insert(0, _SCRIPTS)
@@ -478,6 +479,15 @@ class TestNewFeatures(unittest.TestCase):
         d["house_system"] = "K"
         r = ae.calculate_full_profile(d)
         self.assertIn("Koch", r["charts"]["western"]["system"])
+        self.assertEqual(r["_meta"]["house_system"], "Koch")
+
+    def test_natal_chart_conventions_match_calculation(self):
+        r = ae.calculate_full_profile(dict(self.birth, systems=["western", "vedic"], lat=80))
+        self.assertEqual(r["charts"]["western"]["zodiac"], "tropical")
+        self.assertEqual(r["charts"]["western"]["house_system"], "whole-sign")
+        self.assertEqual(r["_meta"]["house_system"], "whole-sign")
+        self.assertEqual(r["charts"]["vedic"]["zodiac"], "sidereal (Lahiri)")
+        self.assertEqual(r["charts"]["vedic"]["house_system"], "whole-sign")
 
     def test_new_fields_in_natal(self):
         r = ae.calculate_full_profile(BIRTH_BOTH)
@@ -677,29 +687,39 @@ class TestGochara(unittest.TestCase):
     """Wave 2-2: Vedic transits from natal Moon (Chandra Lagna)."""
 
     def test_gochara_structure_and_favorability(self):
-        d = dict(ae._demo())
-        r = ae.calculate_full_profile({**d, "mode": "gochara"})
+        r = ae.calculate_full_profile({**ae._demo(), "mode": "gochara", "target_date": "2026-11-22"})
         g = r["gochara"]
-        self.assertIn("from_moon_sign", g)
-        for p in ("Sun", "Mars", "Saturn", "Jupiter"):
-            t = g["transits"][p]
-            self.assertTrue(1 <= t["house_from_moon"] <= 12)
-            expected = t["house_from_moon"] in t["good_houses"]
-            self.assertEqual(t["favorable"], expected)
-        # Saturn note consistency: house 1/2/12 → Sade Sati phases
-        sh = g["transits"]["Saturn"]["house_from_moon"]
-        if sh in (12, 1, 2):
-            self.assertTrue(g["transits"]["Saturn"]["note"].startswith("Sade"))
+        self.assertEqual(g["from_moon_sign"], "Aquarius")
+        # Sun clears all three conditions. Jupiter and Venus are in good
+        # houses but miss the SAV (25) and individual BAV (4) minima respectively.
+        for body, expected in {"Sun": (10, 31, 5, True), "Jupiter": (7, 19, 4, False),
+                               "Venus": (8, 28, 3, False)}.items():
+            transit = g["transits"][body]
+            self.assertIn(transit["house_from_moon"], transit["good_houses"])
+            self.assertEqual(tuple(transit[k] for k in
+                                   ("house_from_moon", "sav_bindus", "bav_bindus", "favorable")), expected)
+        self.assertEqual(g["transits"]["Saturn"]["note"], "Sade Sati setting phase")
+
+    def test_bindus_are_indexed_by_absolute_sidereal_sign(self):
+        # Every contributor occupies Taurus. The Sun table gives the fourth
+        # sign (Leo) four points from Sun, Mars, Saturn and Lagna, and the
+        # fifth (Virgo) one point from Jupiter.
+        lons = {p: 35.0 for p in ("Sun", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn")}
+        with patch.object(ae, "body_longitudes", return_value=(lons, {}, "builtin")), \
+                patch.object(ae, "ayanamsha_lahiri", return_value=0), \
+                patch.object(ae, "ascendant_mc", return_value=(35.0, 0)):
+            bav = ae.ashtakavarga(2451545, 0, 0)["bhinnashtakavarga"]["Sun"]
+        self.assertEqual((bav[4], bav[5]), (4, 1))
 
     def test_sade_sati_consistency_with_transit_mode(self):
-        d = dict(ae._demo())
+        d = {**ae._demo(), "target_date": "2026-11-22"}
         rg = ae.calculate_full_profile({**d, "mode": "gochara"})["gochara"]
-        rt = ae.calculate_full_profile({**d, "mode": "transit",
-                                        "transit_date": ae.TODAY.strftime("%Y-%m-%d")})
+        rt = ae.calculate_full_profile({**d, "mode": "transit", "transit_date": d["target_date"]})
         ss_transit = rt["transits"]["sade_sati"]
         sat_house = rg["transits"]["Saturn"]["house_from_moon"]
-        if ss_transit.get("active"):
-            self.assertIn(sat_house, (12, 1, 2))
+        self.assertEqual(ss_transit["moon_sign"], rg["from_moon_sign"])
+        self.assertEqual(ss_transit["active"], sat_house in (12, 1, 2))
+        self.assertEqual(ss_transit["phase"], "setting")
 
 
 class TestDashaReading(unittest.TestCase):
@@ -840,12 +860,15 @@ class TestLillyAlmutenAndRamanYogas(unittest.TestCase):
         self.assertIn("warnings", hor["lilly_considerations"])
 
     def test_raman_advanced_yogas_detection(self):
-        d = dict(ae._demo())
-        r = ae.calculate_full_profile(d)
-        yogas = r["charts"]["vedic"]["yogas"]
-        self.assertTrue(len(yogas) >= 1)
-        yoga_names = [y["name"] for y in yogas]
-        self.assertTrue(any("Yoga" in name for name in yoga_names))
+        # Moon in Virgo, Jupiter in Gemini (tenth from the Moon, eighth
+        # from the ascendant). The Gajakesari rule is lunar-relative.
+        d = {**ae._demo(), "day": 1, "hour": 19}
+        vedic = ae.calculate_full_profile(d)["charts"]["vedic"]
+        self.assertEqual(vedic["planets"]["Moon"]["sign"], "Virgo")
+        self.assertEqual(vedic["planets"]["Jupiter"]["sign"], "Gemini")
+        self.assertIn("Gajakesari Yoga", [y["name"] for y in vedic["yogas"]])
+        # The demo chart itself has no qualifying combination.
+        self.assertEqual(ae.calculate_full_profile(ae._demo())["charts"]["vedic"]["yogas"], [])
 
 
 class TestMedicalAndAyurvedic(unittest.TestCase):
@@ -1111,7 +1134,22 @@ class TestDavisonAndDraconic(unittest.TestCase):
         self.assertIn("davison_midpoint", dav)
         self.assertIn("chart", dav)
         self.assertIn("relationship_transits", dav)
-        self.assertEqual(dav["davison_midpoint"]["datetime_utc"], "1991-08-20 16:30 UTC")
+        # Both dates used Eastern daylight time (UTC-04). Their UTC
+        # instants are 1990-06-15 18:30 and 1992-10-24 12:30.
+        self.assertEqual(dav["davison_midpoint"]["datetime_utc"], "1991-08-20 15:30 UTC")
+
+    def test_davison_across_daylight_saving_transition(self):
+        # New York's clocks skip directly from 01:59 to 03:00.
+        a = {**ae._demo(), "year": 2024, "month": 3, "day": 10, "hour": 1, "minute": 30}
+        b = {**a, "hour": 3}
+        dav = ae.calculate_full_profile({**a, "mode": "davison", "partner": b})["davison"]
+        self.assertEqual(dav["davison_midpoint"]["datetime_utc"], "2024-03-10 07:00 UTC")
+
+    def test_davison_midpoint_at_a_minute_boundary(self):
+        a = {**ae._demo(), "year": 1990, "month": 1, "day": 1, "hour": 0, "minute": 0, "tz": "UTC"}
+        b = {**a, "year": 2000, "minute": 2}
+        dav = ae.calculate_full_profile({**a, "mode": "davison", "partner": b})["davison"]
+        self.assertEqual(dav["davison_midpoint"]["datetime_utc"], "1995-01-01 00:01 UTC")
 
     def test_draconic_chart_and_synastry(self):
         pA = dict(ae._demo())

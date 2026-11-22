@@ -201,5 +201,4 @@ Real readings name the shadow — that candor is why they land. But:
 ## What makes them come back
 Accuracy they can verify (real math, cited placements), being *seen* (synthesis, not
 fluff), useful timing (when it ends), one concrete action, and warmth without flattery.
-Consistency across visits — which is why you **save the profile to memory** and read the
-same chart the same way every time.
+For a repeat visit, ask the requester to supply the birth details again and use the same chart settings.
