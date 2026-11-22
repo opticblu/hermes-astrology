@@ -64,7 +64,7 @@ def main():
                     help="systems: western vedic bazi")
     ap.add_argument("--summary", action="store_true",
                     help="short summary instead of full JSON")
-    ap.add_argument("--date", help="transit date YYYY-MM-DD")
+    ap.add_argument("--date", help="observation date for natal milestones and transits (YYYY-MM-DD, 00:00 UTC)")
     ap.add_argument("--partner", type=str,
                     help="partner birth data JSON (for synastry/compatibility)")
     a = ap.parse_args()

@@ -163,6 +163,8 @@ python3 "${SKILL_DIR%%/SKILL.md}/scripts/daily-astrology-fetch.py"
 
 For a chart reading, identify the zodiac and house system returned by the calculation. Western charts use the tropical zodiac. Vedic charts use the Lahiri sidereal zodiac and whole-sign houses. In a mixed reading label each tradition separately. For BaZi, name the Chinese pillars being read.
 
+Read each planet’s house directly from its placement. Planets in one sign can occupy different Placidus houses. For an element tally of planets, use `planet_element_balance`. If counting the ascendant too, say so. Verify any current transit against the requested date and give its measured orb. An exact-hit date requires a crossing calculation.
+
 The engine prefers Swiss Ephemeris when available (`python -m pip install pyswisseph==2.10.3.2`). Check `_meta.engine_backend` and the chart’s `house_system` for the actual result. With unknown birth time, omit rising signs, houses, and the hour pillar even if a template asks for them. If a planet has `possible_signs`, give both possibilities and explain why the time matters.
 
 ### 3 — Ground interpretation

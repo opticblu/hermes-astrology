@@ -800,7 +800,7 @@ def suggest_remedies(chart_data):
             result["general_advice"].append(result["element_balance"]["advice_lacking"])
     
     # General guidance
-    if chart_data.get("life_phase", {}).get("current_age", 30) in range(27, 33):
+    if "Saturn Return" in chart_data.get("life_phase", {}).get("active_milestones", []):
         result["general_advice"].append("You're in Saturn Return territory — this is a structural reckoning. Build foundations, not fantasies.")
     
     return result

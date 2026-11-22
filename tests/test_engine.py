@@ -49,6 +49,14 @@ class TestSignOf(unittest.TestCase):
 
 
 class TestWesternChart(unittest.TestCase):
+    def test_element_totals_distinguish_planets_from_ascendant(self):
+        chart = self.data["charts"]["western"]
+        counts = chart["planet_element_balance"]
+        self.assertEqual(sum(counts.values()), 10)
+        including_asc = counts.copy()
+        including_asc[ae.SIGN_DATA[chart["ascendant"]["sign"]]["element"]] += 1
+        self.assertEqual(chart["element_balance"], including_asc)
+
     data = ae.calculate_full_profile(BIRTH_WEST)
     def test_meta(self):        self.assertIn("_meta", self.data)
     def test_western_present(self): self.assertIn("western", self.data["charts"])

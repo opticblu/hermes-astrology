@@ -74,6 +74,9 @@ def get_astrology_chart(
     Calculate an astrological chart (Western, Vedic, BaZi) based on birth data.
     Omit hour if birth time is unknown. For synastry, pass the second person's
     birth date, optional clock time, location and timezone in partner.
+    For Western readings use each planet's own house and planet_element_balance
+    for ten-planet counts. Use transit_date for a dated reading and report the
+    measured orb when describing a current planetary return or opposition.
     """
     if systems is None:
         systems = ["western", "vedic", "bazi"]
