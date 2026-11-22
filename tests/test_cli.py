@@ -84,6 +84,15 @@ class TestCLIInterface(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("=== WESTERN ===", r.stdout)
 
+    def test_date_only_summary_reports_both_moon_signs(self):
+        data = {"date": "2024-03-10", "tz": "America/Chicago", "systems": ["western"]}
+        r = self._run("--json", json.dumps(data), "--summary")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"Moon\s+Pisces or Aries")
+        self.assertIn("Zodiac: tropical", r.stdout)
+        for text in ("Rising:", "Houses:", "0.0°", "=== VEDIC ==="):
+            self.assertNotIn(text, r.stdout)
+
 class TestDailyFetchTimezone(unittest.TestCase):
     """daily-astrology-fetch.py must report Tehran-local time, not UTC."""
 

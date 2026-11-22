@@ -243,9 +243,15 @@ DIGNITY = {
     "Saturn":  {"rule":["Capricorn","Aquarius"],"exalt":["Libra"],"detri":["Cancer","Leo"],"fall":["Aries"]},
 }
 
-SATURN_RETURN_AGES = [29, 58, 87]   # ~29.5 yr Saturn cycle
-JUPITER_RETURN_AGES = [12, 24, 36, 48, 60, 72, 84]
-NODE_RETURN_AGES = [18.6, 37.2, 55.8, 74.4]   # ~18.6 yr nodal cycle (incl. ~mid 'nodal reversal')
+# Engine convention for measured slow-planet cycles in tropical longitude.
+CYCLE_ORB_DEG = 3.0
+CYCLE_ASPECTS = {
+    ("Saturn", "conjunction"): "Saturn Return",
+    ("Jupiter", "conjunction"): "Jupiter Return",
+    ("North Node", "conjunction"): "Nodal Return",
+    ("North Node", "opposition"): "Nodal Reversal",
+    ("Uranus", "opposition"): "Uranus Opposition",
+}
 
 # Western anatomy — zodiac sign → body part (classical rulerships)
 # Used in medical astrology: avoid surgery when Moon transits the sign ruling
@@ -631,19 +637,23 @@ def _moon_geo_lon(d, sun):
             -0.031*_sin(Mm+Ms) -0.015*_sin(2*F-2*D) +0.011*_sin(Mm-4*D))
     return norm360(lon + dlon)
 
-def _resolve_target_dt(data, default=None):
-    """Normalize user/agent date input (target_date, as_of, date) into a naive UTC datetime."""
-    for k in ("target_date", "as_of", "date"):
-        v = data.get(k)
-        if v:
-            if isinstance(v, datetime):
-                return v
+def _resolve_target_dt(data, default=None, date_is_birth=False):
+    """Return the requested observation instant as naive UTC, or the current instant."""
+    if data.get("transit_date"):
+        return datetime.strptime(data["transit_date"], "%Y-%m-%d")
+    keys = ("target_date", "as_of") if date_is_birth else ("target_date", "as_of", "date")
+    for key in keys:
+        value = data.get(key)
+        if not value:
+            continue
+        if isinstance(value, datetime):
+            instant = value
+        else:
             try:
-                if len(str(v)) == 10:
-                    return datetime.strptime(str(v), "%Y-%m-%d")
-                return datetime.strptime(str(v), "%Y-%m-%d %H:%M")
-            except Exception:
-                pass
+                instant = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(f"{key} must be an ISO date or datetime") from exc
+        return instant.astimezone(timezone.utc).replace(tzinfo=None) if instant.tzinfo else instant
     return default or datetime.now(timezone.utc).replace(tzinfo=None)
 
 def _node_lon(d):
@@ -960,10 +970,6 @@ def ashtakavarga(jd, lat, lng, time_known=True):
         positions[p] = norm360(lons[p] - ayan)
     positions["Lagna"] = norm360(asc_lon)
 
-    def _houses(sig_pos, from_pos):
-        """Houses from from_pos to each house occupied by sig_pos."""
-        return [int(((norm360(sig_pos - from_pos)) % 360) // 30) + 1]
-
     # Benefic bindu tables (Phala Deepika Ch.23, verified totals)
     BAV_TABLES = {
         "Sun": {
@@ -1007,14 +1013,11 @@ def ashtakavarga(jd, lat, lng, time_known=True):
     for p in BAV_TABLES:
         counts = [0]*12
         for sig, houses in BAV_TABLES[p].items():
-            sig_pos = positions[sig]
-            # Each house h in the list is counted FROM the significator's own
-            # position (Phala Deepika: "from the Sun 8" = Sun places bindus in
-            # 8 houses measured from itself); map to the corresponding house of P.
+            # All BAV rows share the absolute sidereal zodiac used by SAV
+            # and by the transiting sign lookup in gochara().
+            origin_sign = int(positions[sig] // 30)
             for h in houses:
-                abs_lon = norm360(sig_pos + (h - 1) * 30.0)
-                house_in_p = int(((abs_lon - positions[p]) % 360) // 30)
-                counts[house_in_p] += 1
+                counts[(origin_sign + h - 1) % 12] += 1
         bhinnas[p] = counts
     sarva = [0]*12
     for p in BAV_TABLES:
@@ -1230,11 +1233,16 @@ def placidus_house_of(planet_lon, cusps):
 def to_utc(data):
     """Return (naive UTC datetime, info dict). Handles tz name / offset / estimate."""
     y=data["year"]; mo=data["month"]; d=data["day"]
-    h=int(data.get("hour",12)); mi=int(data.get("minute",0))
-    info = {"time_known": data.get("time_known", True)}
-    if not info["time_known"]:
+    flag = data.get("time_known")
+    if flag is not None and not isinstance(flag, bool):
+        raise ValueError("time_known must be a boolean")
+    known = data.get("hour") is not None and flag is not False
+    info = {"time_known": known}
+    if known:
+        h, mi = int(data["hour"]), int(data.get("minute") or 0)
+    else:
         h, mi = 12, 0
-        info["note"] = "birth time unknown — defaulted to local noon; houses/Asc/Moon-degree are approximate"
+        info["note"] = "Birth time unknown. Local noon is a reference for approximate planetary positions."
     tz = data.get("tz")
     off = data.get("utc_offset")
     naive_local = datetime(y,mo,d,h,mi)
@@ -1421,7 +1429,9 @@ def compute_aspects(lons, ayan=0.0, bodies=None):
 
 def western_chart(jd, lat, lng, time_known=True, house_system="P"):
     lons, speed, backend = body_longitudes(jd)
-    asc_lon, mc_lon = ascendant_mc(jd, lat, lng) if time_known else (lons["Sun"], norm360(lons["Sun"]+270))
+    if not time_known:
+        raise ValueError("A date-only chart needs a local civil date. Use calculate_full_profile with time_known=False.")
+    asc_lon, mc_lon = ascendant_mc(jd, lat, lng)
     names = ["Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn",
              "Uranus","Neptune","Pluto","North Node","South Node","Chiron"]
     use_placidus = _HAS_SWE and time_known
@@ -1436,6 +1446,7 @@ def western_chart(jd, lat, lng, time_known=True, house_system="P"):
     elem={"Fire":0,"Earth":0,"Air":0,"Water":0}; mod={"Cardinal":0,"Fixed":0,"Mutable":0}
     for nm in ["Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","Uranus","Neptune","Pluto"]:
         sd=SIGN_DATA[planets[nm]["sign"]]; elem[sd["element"]]+=1; mod[sd["modality"]]+=1
+    planet_elements = elem.copy()
     sd=SIGN_DATA[asc_sign]; elem[sd["element"]]+=1; mod[sd["modality"]]+=1
     # house cusps — Placidus when available, whole-sign fallback
     if cusps is not None:
@@ -1455,6 +1466,8 @@ def western_chart(jd, lat, lng, time_known=True, house_system="P"):
         house_system = "Western Tropical (whole-sign houses)"
     return {
         "system":house_system,
+        "zodiac": "tropical",
+        "house_system": house_system.split(" (")[0] if cusps is not None and house_code != "W" else "whole-sign",
         "big_three":{"sun":planets["Sun"]["sign"],"moon":planets["Moon"]["sign"],"rising":asc_sign},
         "ascendant":{"sign":asc_sign,"deg_in_sign":asc_deg,"abs_lon":round(asc_lon,3)},
         "midheaven":{"sign":mc_sign,"deg_in_sign":mc_deg,"abs_lon":round(mc_lon,3)},
@@ -1471,14 +1484,18 @@ def western_chart(jd, lat, lng, time_known=True, house_system="P"):
         "antiscia": {nm: round(antiscia(planets[nm]["abs_lon"]), 3) for nm in names},
         "declinations": {nm: round(d, 3) for nm, d in body_declinations(jd).items()},
         "declination_aspects": compute_declination_aspects(lons, body_declinations(jd))[:12],
+        "planet_element_balance": planet_elements,
         "element_balance":elem,"modality_balance":mod,
+        "balance_basis": "planet_element_balance counts Sun through Pluto; element_balance and modality_balance also include the ascendant",
         "dominant_element":max(elem,key=elem.get),"lacking_element":min(elem,key=elem.get),
     }
 
 def vedic_chart(jd, lat, lng, birth_dt, time_known=True, as_of_dt=None):
     lons, speed, backend = body_longitudes(jd)
     ayan = ayanamsha_lahiri(jd)
-    asc_lon, mc_lon = ascendant_mc(jd, lat, lng, ayan) if time_known else (norm360(lons["Sun"]-ayan), 0)
+    if not time_known:
+        raise ValueError("A date-only chart needs a local civil date. Use calculate_full_profile with time_known=False.")
+    asc_lon, mc_lon = ascendant_mc(jd, lat, lng, ayan)
     names=["Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","North Node","South Node"]
     planets=_planet_block(lons, speed, asc_lon, names, ayan=ayan, vedic=True)
     # remap node names to Rahu/Ketu in output
@@ -1515,6 +1532,8 @@ def vedic_chart(jd, lat, lng, birth_dt, time_known=True, as_of_dt=None):
     return {
         "tithi": f"{paksha} Paksha, Tithi {tithi_num}",
         "system":"Vedic / Jyotisha — Lahiri sidereal, whole-sign (rashi) houses",
+        "zodiac": "sidereal (Lahiri)",
+        "house_system": "whole-sign",
         "as_of_date": eval_dt.strftime("%Y-%m-%d"),
         "ayanamsha_deg":round(ayan,4),
         "lagna":{"sign":lagna_sign,"deg_in_sign":lagna_deg,"lord":RASHI_LORDS[lagna_sign]},
@@ -1685,17 +1704,17 @@ def detect_yogas(planets, lagna_sign):
             yogas.append({"name": "Maha Parivartana Yoga (9th & 10th Lords)", "planet": f"{l9}<->{l10}", "rule": f"9th and 10th lords in mutual sign exchange", "effect": "Kingly stature, monumental career success and enduring legacy"})
 
     # 5. Gajakesari: Jupiter in kendra (1/4/7/10) from Moon
-    if "Jupiter" in planets and "Moon" in planets:
-        diff = (planets["Jupiter"]["house"] - planets["Moon"]["house"]) % 12
-        if planets["Jupiter"]["house"] in (1, 4, 7, 10) and diff in (0, 3, 6, 9):
+    if sign("Jupiter") in SIGNS and sign("Moon") in SIGNS:
+        diff = (SIGNS.index(sign("Jupiter")) - SIGNS.index(sign("Moon"))) % 12
+        if diff in (0, 3, 6, 9):
             yogas.append({"name": "Gajakesari Yoga", "planet": "Jupiter+Moon", "rule": "Jupiter in a kendra (1/4/7/10) from the Moon", "effect": "Intelligence, noble reputation, lasting prosperity and respected influence"})
 
     # 6. Budha-Aditya: Sun & Mercury same sign
-    if planets.get("Sun", {}).get("sign") == planets.get("Mercury", {}).get("sign"):
+    if sign("Sun") is not None and sign("Sun") == sign("Mercury"):
         yogas.append({"name": "Budha-Aditya Yoga", "planet": "Sun+Mercury", "rule": "Sun and Mercury conjoined in the same sign", "effect": "Sharp intellect, communication mastery and administrative talent"})
 
     # 7. Chandra-Mangala: Moon & Mars conjoined
-    if planets.get("Moon", {}).get("sign") == planets.get("Mars", {}).get("sign"):
+    if sign("Moon") is not None and sign("Moon") == sign("Mars"):
         yogas.append({"name": "Chandra-Mangala Yoga", "planet": "Moon+Mars", "rule": "Moon and Mars conjoined in the same sign", "effect": "Commercial acumen, emotional drive and entrepreneurial wealth creation"})
 
     return yogas
@@ -1849,6 +1868,8 @@ def transits(natal_jd, natal_lat, natal_lng, transit_dt_utc):
             sep=abs(norm180(t_lons[tp]-natal_lons[npn]))
             for asp,(ang,orb,desc) in ASPECTS.items():
                 tight = orb if tp in ("Jupiter","Saturn") else min(orb,4)
+                if tp == npn and (tp, asp) in CYCLE_ASPECTS:
+                    tight = CYCLE_ORB_DEG
                 if abs(sep-ang)<=tight:
                     hits.append({"transiting":tp,"to_natal":npn,"aspect":asp,
                                  "orb":round(abs(sep-ang),2),
@@ -1856,17 +1877,18 @@ def transits(natal_jd, natal_lat, natal_lng, transit_dt_utc):
                                  "retrograde":t_speed.get(tp,0)<0,
                                  "meaning":desc})
     hits.sort(key=lambda x:x["orb"])
-    # Sade Sati check against transit Saturn
-    natal_moon_sign = sign_of(natal_lons["Moon"])[0]
+    # Sade Sati uses the Lahiri sidereal zodiac at each body's own epoch.
+    natal_moon_sign = sign_of(natal_lons["Moon"] - ayanamsha_lahiri(natal_jd))[0]
     natal_moon_idx = SIGNS.index(natal_moon_sign)
-    sat_sign_idx = SIGNS.index(sign_of(t_lons["Saturn"])[0])
+    sat_sign_idx = SIGNS.index(sign_of(t_lons["Saturn"] - ayanamsha_lahiri(t_jd))[0])
     delta = (sat_sign_idx - natal_moon_idx) % 12
     sade_sati = None
     if delta == 11:   sade_sati = {"active":True,"phase":"rising","saturn_sign":SIGNS[sat_sign_idx],"moon_sign":natal_moon_sign}
     elif delta == 0:  sade_sati = {"active":True,"phase":"peak","saturn_sign":SIGNS[sat_sign_idx],"moon_sign":natal_moon_sign}
     elif delta == 1:  sade_sati = {"active":True,"phase":"setting","saturn_sign":SIGNS[sat_sign_idx],"moon_sign":natal_moon_sign}
     else:             sade_sati = {"active":False,"saturn_sign":SIGNS[sat_sign_idx],"moon_sign":natal_moon_sign}
-    return {"transit_date":transit_dt_utc.strftime("%Y-%m-%d"),
+    sade_sati["zodiac"] = "sidereal (Lahiri)"
+    return {"transit_date":transit_dt_utc.strftime("%Y-%m-%d"), "zodiac": "tropical",
             "current_positions":{p:{"sign":sign_of(t_lons[p])[0],
                                     "deg":round(t_lons[p]%30,2),
                                     "retrograde":t_speed.get(p,0)<0}
@@ -1875,14 +1897,18 @@ def transits(natal_jd, natal_lat, natal_lng, transit_dt_utc):
             "aspects_to_natal":hits[:20],
             "sade_sati":sade_sati}
 
-def synastry(jdA, jdB):
+def synastry(jdA, jdB, time_known_a=True, time_known_b=True):
     """Inter-chart aspects (A's planets to B's planets) — relationship synastry."""
     lonsA,_,_=body_longitudes(jdA)
     lonsB,_,_=body_longitudes(jdB)
     pts=["Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","North Node"]
     inter=[]
     for a in pts:
+        if a == "Moon" and not time_known_a:
+            continue
         for b in pts:
+            if b == "Moon" and not time_known_b:
+                continue
             sep=abs(norm180(lonsA[a]-lonsB[b]))
             for asp,(ang,orb,desc) in ASPECTS.items():
                 if abs(sep-ang)<=orb:
@@ -1890,6 +1916,10 @@ def synastry(jdA, jdB):
                     inter.append({"personA_planet":a,"personB_planet":b,"aspect":asp,
                                   "orb":round(abs(sep-ang),2),"weight":weight,"meaning":desc})
     inter.sort(key=lambda x:(0 if x["weight"]=="major" else 1, x["orb"]))
+    if not time_known_a or not time_known_b:
+        return {"inter_aspects": inter[:25],
+                "note": "Approximate aspects use local noon for an unknown birth time. "
+                        "Moon contacts for that person are omitted."}
     # quick harmony score: trine/sextile/conjunction(benefic) = +, square/opposition = −
     score=0
     for it in inter[:25]:
@@ -2407,7 +2437,9 @@ def navamsa_chart(jd, lat, lng, time_known=True):
     marriage, and dharma. Essential for assessing planetary strength (vargottama)."""
     lons, speed, backend = body_longitudes(jd)
     ayan = ayanamsha_lahiri(jd)
-    asc_lon, mc_lon = ascendant_mc(jd, lat, lng, ayan) if time_known else (norm360(lons["Sun"]-ayan), 0)
+    if not time_known:
+        raise ValueError("Navamsa requires a known birth time.")
+    asc_lon, mc_lon = ascendant_mc(jd, lat, lng, ayan)
 
     navamsa_lons = {}
     names = ["Sun","Moon","Mercury","Venus","Mars","Jupiter","Saturn","North Node","South Node"]
@@ -2699,6 +2731,8 @@ def composite_chart(jdA, jdB, latA, lngA, latB, lngB):
     aspects = compute_aspects({nm: planets[nm]["longitude"] for nm in planets})[:20]
     return {
         "system": "Composite Chart (midpoint method)",
+        "zodiac": "tropical",
+        "house_system": "whole-sign",
         "note": "The composite chart represents the relationship itself as a third entity. Each planet is the midpoint of its positions in both natal charts.",
         "ascendant": {"sign": asc_sign, "degree": round(asc_deg, 2)},
         "midheaven": {"sign": mc_sign, "degree": round(mc_deg, 2)},
@@ -3251,12 +3285,15 @@ def transit_to_natal_aspects(natal_jd, transit_jd):
             sep = abs(norm180(trans_lons[t_p] - natal_lons[n_p]))
             for asp, (ang, orb, desc) in ASPECTS.items():
                 d = abs(sep - ang)
+                if t_p == n_p and (t_p, asp) in CYCLE_ASPECTS:
+                    orb = CYCLE_ORB_DEG
                 if d <= orb:
-                    applying = (trans_speed.get(t_p, 0) < 0) if asp in ("conjunction","opposition") else None
-                    speed_val = trans_speed.get(t_p, 0)
-                    if speed_val != 0:
-                        future_sep = abs(norm180(norm360(trans_lons[t_p] + speed_val * 0.1) - natal_lons[n_p]))
-                        applying = future_sep < sep
+                    speed = trans_speed.get(t_p, 0)
+                    delta = norm180(trans_lons[t_p] - natal_lons[n_p])
+                    # The natal point is fixed. Track distance to the nearer
+                    # exact aspect on either side of it, including retrogrades.
+                    signed_orb = norm180(delta - (ang if delta >= 0 else -ang))
+                    applying = signed_orb * speed < 0 if speed else None
                     impact = "high" if asp in ("conjunction","opposition","square") and d < 2 else \
                              "moderate" if asp in ("conjunction","opposition","square","trine") else "low"
                     results.append({
@@ -3603,6 +3640,10 @@ def event_chart(data):
     jd = julian_day(utc)
     lat = data.get("lat", 0.0); lng = data.get("lng", 0.0)
     time_known = tinfo.get("time_known", True)
+    if not time_known:
+        systems = data.get("systems", ("western", "vedic", "bazi"))
+        _, charts = _date_only_charts(data, systems)
+        return {"subject": data.get("subject", "(unnamed event)"), "time_info": tinfo, **charts}
     birth_local = datetime(data["year"], data["month"], data["day"],
                            int(data.get("hour", 12)), int(data.get("minute", 0)))
     systems = data.get("systems", ["western", "vedic", "bazi"])
@@ -3612,8 +3653,8 @@ def event_chart(data):
                   "subject": data.get("subject", "(unnamed event)"),
                   "kind": data.get("kind", "event"),
                   "moment_utc": utc.strftime("%Y-%m-%d %H:%M"),
-                  "precision_note": ("arcsecond (Swiss Ephemeris)" if backend == "swisseph"
-                                     else "~1-2 arcmin (builtin) — exact to sign/house/nakshatra/dasha")},
+                  "precision_note": ("Swiss Ephemeris planetary positions; Chiron can use a built-in approximation" if backend == "swisseph"
+                                     else "approximate built-in positions; placements near boundaries can change")},
         "subject": data.get("subject", "(unnamed event)"),
         "moment": {"local": birth_local.strftime("%Y-%m-%d %H:%M"),
                    "utc": utc.strftime("%Y-%m-%d %H:%M"),
@@ -3635,22 +3676,32 @@ def event_chart(data):
 #  SECTION H — ORCHESTRATION
 # ═════════════════════════════════════════════════════════════════════════════
 
-def life_phase(birth_dt):
-    """Age-based transit milestones everyone hits — grounded, not chart-specific."""
-    age=_age(birth_dt)
-    notes=[]
-    for sr in SATURN_RETURN_AGES:
-        if abs(age-sr)<=2.5:
-            notes.append(f"Saturn Return (~age {sr}): a structural reckoning — career, commitment, adulthood; "
-                         f"life asks what is built to last.")
-    for nr in NODE_RETURN_AGES:
-        if abs(age-nr)<=1:
-            notes.append(f"Nodal Return/Reversal (~age {nr:.0f}): a karmic re-orientation of direction and relationships.")
-    if abs(age-42)<=2:
-        notes.append("Uranus Opposition (~age 40-42): the 'mid-life' awakening — authenticity vs. the life you built.")
-    if abs(age-12)<=1 or abs(age-24)<=1 or abs(age-36)<=1:
-        notes.append("Jupiter Return (~every 12 yrs): a cycle of growth, opportunity and expansion opens.")
-    return {"current_age":round(age,1),"active_milestones":notes}
+def life_phase(birth_utc, as_of_utc=None):
+    """Measure slow-planet self-aspects at a single UTC instant."""
+    as_of_utc = as_of_utc or datetime.now(timezone.utc).replace(tzinfo=None)
+    age = (as_of_utc - birth_utc).total_seconds() / (365.25 * 86400)
+    natal, _, _ = body_longitudes(julian_day(birth_utc))
+    current, _, _ = body_longitudes(julian_day(as_of_utc))
+    checks = {}
+    active = []
+    for (body, aspect), name in CYCLE_ASPECTS.items():
+        separation = abs(norm180(current[body] - natal[body]))
+        orb = abs(separation - ASPECTS[aspect][0])
+        # A slow body can linger near its natal position in the first year.
+        # That initial conjunction is not a completed return.
+        is_active = age >= 1 and orb <= CYCLE_ORB_DEG
+        checks[name] = {
+            "body": body, "aspect": aspect,
+            "natal_longitude_deg": round(natal[body], 5),
+            "transit_longitude_deg": round(current[body], 5),
+            "separation_deg": round(separation, 5), "orb_deg": round(orb, 5),
+            "active": is_active,
+        }
+        if is_active:
+            active.append(name)
+    return {"current_age": round(age, 1), "as_of_utc": as_of_utc.isoformat() + "Z",
+            "zodiac": "tropical", "orb_limit_deg": CYCLE_ORB_DEG,
+            "active_milestones": active, "cycle_aspects": checks}
 
 def _normalize_birth(d):
     """Make input forgiving without changing the canonical schema.
@@ -3665,6 +3716,7 @@ def _normalize_birth(d):
     """
     if not isinstance(d, dict):
         return d
+    d = dict(d)
     if "lng" not in d:
         for alias in ("lon", "long", "longitude"):
             if alias in d:
@@ -3684,7 +3736,7 @@ def _normalize_birth(d):
         except Exception:
             pass
     if isinstance(d.get("partner"), dict):
-        _normalize_birth(d["partner"])
+        d["partner"] = _normalize_birth(d["partner"])
     return d
 
 # Modes that read the current sky (or need no birth data at all). They are
@@ -3694,10 +3746,68 @@ PUBLIC_MODES = ("node_transit_all_signs", "weekly_calendar", "eclipses",
                 "stations", "moon_phase", "planetary_hours",
                 "void_of_course", "muhurta", "electional", "numerology")
 
+def _date_only_charts(data, systems):
+    """Use the actual boundaries of the local civil date, including DST changes."""
+    day = datetime(data["year"], data["month"], data["day"])
+    midnight = dict(data, hour=0, minute=0, time_known=True)
+    start, _ = to_utc(midnight)
+    tomorrow = day + timedelta(days=1)
+    end, _ = to_utc(dict(midnight, year=tomorrow.year, month=tomorrow.month, day=tomorrow.day))
+    if end <= start:
+        raise ValueError("The supplied local date does not exist in that timezone.")
+    # The Moon travels less than one sign per normal civil day. Exclude the
+    # following midnight so an ingress on the next date belongs to that date.
+    jd_start = julian_day(start)
+    jd_end = math.nextafter(julian_day(end), jd_start)
+    samples = [(jd, body_longitudes(jd)[0]) for jd in (jd_start, (jd_start + jd_end) / 2, jd_end)]
+    charts = {}
+    for system in ("western", "vedic"):
+        if system == "vedic" and system not in systems:
+            continue
+        vedic = system == "vedic"
+        offsets = [ayanamsha_lahiri(jd) if vedic else 0 for jd, _ in samples]
+        planets = {}
+        for body in samples[0][1]:
+            if vedic and body in ("Uranus", "Neptune", "Pluto", "Chiron"):
+                continue
+            signs = list(dict.fromkeys(sign_of(lons[body] - shift)[0]
+                                       for (_, lons), shift in zip(samples, offsets)))
+            name = _vedic_name(body) if vedic else body
+            planets[name] = {"sign": signs[0]} if len(signs) == 1 else {"possible_signs": signs}
+        chart = {"system": "Vedic / Jyotisha" if vedic else "Western",
+                 "zodiac": "sidereal (Lahiri)" if vedic else "tropical",
+                 "house_system": None, "planets": planets}
+        if vedic:
+            chart["janma_rashi"] = planets["Moon"]
+        else:
+            summary = {}
+            for body in ("Sun", "Moon"):
+                position = planets[body]
+                if "sign" in position:
+                    summary[body.lower()] = position["sign"]
+                else:
+                    summary[body.lower() + "_possible_signs"] = position["possible_signs"]
+            chart["big_three"] = summary
+        if system in systems:
+            charts[system] = chart
+    if "bazi" in systems:
+        # A solar-term boundary may also change the month/year pillar mid-day.
+        first, last = (bazi_chart(jd, day)["four_pillars"] for jd in (jd_start, jd_end))
+        pillars = {k: first[k] for k in ("year", "month", "day") if first[k] == last[k]}
+        chart = {"system": "Chinese BaZi", "four_pillars": pillars}
+        for key in ("year", "month"):
+            if key not in pillars:
+                chart[key + "_possible_pillars"] = [first[key], last[key]]
+        charts["bazi"] = chart
+    return summary, charts
+
+
 def calculate_full_profile(data):
     global _NODE_TYPE
+    date_is_birth = "year" not in data
     data = _normalize_birth(data)
     mode=data.get("mode","natal")
+    computed_on = datetime.now(timezone.utc).date().isoformat()
     nt_in = data.get("node_type")
     if nt_in not in (None, "true", "mean"):
         return {"mode": mode, "error": "node_type must be 'true' or 'mean'"}
@@ -3710,7 +3820,7 @@ def calculate_full_profile(data):
         t_lons, _, _ = body_longitudes(tjd)
         result = {"_meta": {"engine_backend": body_longitudes(tjd)[2],
                             "swisseph_available": _HAS_SWE,
-                            "computed_on": TODAY.strftime("%Y-%m-%d"),
+                            "computed_on": computed_on,
                             "node_type": "true" if _HAS_SWE else "mean"},
                   "mode": mode,
                   "node_transit_all_signs": node_transit_all_signs(t_lons, jd=tjd)}
@@ -3719,7 +3829,7 @@ def calculate_full_profile(data):
     if mode=="numerology":
         try:
             result = {"_meta": {"engine_backend": "builtin",
-                                "computed_on": TODAY.strftime("%Y-%m-%d")},
+                                "computed_on": computed_on},
                       "mode": mode,
                       "numerology": numerology(data["year"], data["month"],
                                                data["day"], data.get("full_name",""))}
@@ -3753,7 +3863,7 @@ def calculate_full_profile(data):
         tlat = data.get("lat", 0.0); tlng = data.get("lng", 0.0)
         result = {"_meta": {"engine_backend": body_longitudes(tjd)[2],
                             "swisseph_available": _HAS_SWE,
-                            "computed_on": TODAY.strftime("%Y-%m-%d")},
+                            "computed_on": computed_on},
                   "mode": mode}
         if mode=="weekly_calendar":
             from astro_advanced import weekly_astro_calendar
@@ -4166,7 +4276,8 @@ def calculate_full_profile(data):
             import astro_trading_engine as ate
             asset = data.get("asset", "BTC")
             cap = float(data.get("initial_capital", 100000.0))
-            result["historical_astro_backtest"] = ate.AstraeaQuantTradingAPI.run_historical_backtest(asset, cap)
+            start_year = int(data.get("start_year", 2017))
+            result["historical_astro_backtest"] = ate.AstraeaQuantTradingAPI.run_historical_backtest(asset, cap, start_year)
             return result
         if mode=="decisive_signal":
             import astro_trading_engine as ate
@@ -4188,61 +4299,105 @@ def calculate_full_profile(data):
             result["bayer_mercury_analysis"] = ate.GeorgeBayerEngine.evaluate_mercury_speed(merc_spd)
             return result
 
+    target_eval_dt = _resolve_target_dt(data, date_is_birth=date_is_birth)
+    target_eval_jd = julian_day(target_eval_dt)
     birth_utc, tinfo = to_utc(data)
     jd=julian_day(birth_utc)
     lat=data.get("lat",0.0); lng=data.get("lng",0.0)
     time_known=tinfo.get("time_known",True)
     birth_local=datetime(data["year"],data["month"],data["day"],
-                         int(data.get("hour",12)),int(data.get("minute",0)))
+                         int(data["hour"]) if time_known else 12,
+                         int(data.get("minute") or 0) if time_known else 0)
     systems=data.get("systems",["western","vedic","bazi"])
     _,_,backend=body_longitudes(jd)
 
-    result={"_meta":{"engine_backend":backend,"swisseph_available":_HAS_SWE,
-                     "birth_utc":birth_utc.strftime("%Y-%m-%d %H:%M"),"julian_day":round(jd,5),
-                     "computed_on":TODAY.strftime("%Y-%m-%d"),
-                     "house_system":"Placidus (Swiss Ephemeris)" if _HAS_SWE else "whole-sign",
-                     "node_type": _NODE_TYPE,
-                     "precision_note":("arcsecond (Swiss Ephemeris)" if backend=="swisseph"
-                                       else "~1-2 arcmin (builtin) — exact to sign/house/nakshatra/dasha")},
-            "input":{k:data.get(k) for k in
-                     ("name","year","month","day","hour","minute","lat","lng","tz","gender")},
-            "time_info":tinfo,
-            "summary": {
-                "big_three": {
-                    "sun": sign_of(body_longitudes(jd)[0]["Sun"])[0],
-                    "moon": sign_of(body_longitudes(jd)[0]["Moon"])[0],
-                    "ascendant": sign_of(ascendant_mc(jd, lat, lng)[0])[0]
+    if not time_known:
+        brief, date_charts = _date_only_charts(data, systems)
+        result = {"_meta": {"engine_backend": backend, "reference_utc": birth_utc.isoformat(),
+                            "swisseph_available": _HAS_SWE, "house_system": None,
+                            "computed_on": computed_on, "node_type": _NODE_TYPE},
+                  "input": {k: data[k] for k in ("name", "year", "month", "day", "lat", "lng", "tz", "gender")
+                            if k in data},
+                  "mode": mode, "time_info": tinfo, "summary": {"zodiac": "tropical", "big_three": brief}}
+        if mode == "natal":
+            result["charts"] = date_charts
+            result["life_phase"] = life_phase(birth_utc, target_eval_dt)
+            if data.get("include_numerology"):
+                result["numerology"] = numerology(data["year"], data["month"], data["day"], data.get("full_name", ""))
+            return result
+        if mode == "event":
+            result["event_chart"] = {"subject": data.get("subject", "(unnamed event)"),
+                                     "time_info": tinfo, **date_charts}
+            return result
+        # These modes use planetary/noon estimates, a separately specified
+        # event time or the date alone. Other natal techniques assume an hour.
+        if mode not in ("transit", "transit_natal_aspects", "synastry", "horary", "prashna",
+                        "mundane", "daily_panchang", "choghadiya", "find_best_time", "electional_search",
+                        "tarot_3card", "tarot_celtic_cross", "tarot_soul_personality", "tarot_12house"):
+            return {"mode": mode, "error": f"{mode} requires a known birth time."}
+    else:
+        result={"_meta":{"engine_backend":backend,"swisseph_available":_HAS_SWE,
+                         "birth_utc":birth_utc.strftime("%Y-%m-%d %H:%M"),"julian_day":round(jd,5),
+                         "computed_on":computed_on,
+                         "house_system": None,
+                         "node_type": _NODE_TYPE,
+                         "precision_note":("Swiss Ephemeris planetary positions; Chiron can use a built-in approximation" if backend=="swisseph"
+                                           else "approximate built-in positions; placements near boundaries can change")},
+                "input":{k:data.get(k) for k in
+                         ("name","year","month","day","hour","minute","lat","lng","tz","gender")},
+                "time_info":tinfo,
+                "summary": {
+                    "zodiac": "tropical",
+                    "big_three": {
+                        "sun": sign_of(body_longitudes(jd)[0]["Sun"])[0],
+                        "moon": sign_of(body_longitudes(jd)[0]["Moon"])[0],
+                        "ascendant": sign_of(ascendant_mc(jd, lat, lng)[0])[0]
+                    },
+                    "plain_takeaway": (
+                        f"هویت محوری در {sign_of(body_longitudes(jd)[0]['Sun'])[0]} (موتور اراده و انگیزه)، "
+                        f"امنیت عاطفی در {sign_of(body_longitudes(jd)[0]['Moon'])[0]} (نیازهای قلبی و ناخودآگاه)، "
+                        f"و نقاب بیرونی در {sign_of(ascendant_mc(jd, lat, lng)[0])[0]} (نحوه مواجهه با جهان)."
+                    )
                 },
-                "plain_takeaway": (
-                    f"هویت محوری در {sign_of(body_longitudes(jd)[0]['Sun'])[0]} (موتور اراده و انگیزه)، "
-                    f"امنیت عاطفی در {sign_of(body_longitudes(jd)[0]['Moon'])[0]} (نیازهای قلبی و ناخودآگاه)، "
-                    f"و نقاب بیرونی در {sign_of(ascendant_mc(jd, lat, lng)[0])[0]} (نحوه مواجهه با جهان)."
-                )
-            },
-            "mode":mode}
+                "mode":mode}
 
-    # Resolve target evaluation moment dynamically for any mode (target_date / as_of / date)
-    target_eval_dt = _resolve_target_dt(data)
-    target_eval_jd = julian_day(target_eval_dt)
+    if mode in ("synastry", "compatibility", "composite", "davison", "davison_progression",
+                "draconic_synastry", "guna_milan"):
+        partner = data["partner"]
+        partner_utc, partner_info = to_utc(partner)
+        if not partner_info["time_known"] and mode != "synastry":
+            return {"mode": mode, "error": f"{mode} requires a known birth time for the partner."}
 
     if mode=="transit":
-        result["natal_brief"]=western_chart(jd,lat,lng,time_known)["big_three"]
-        tdate=data.get("transit_date")
-        tdt=datetime.strptime(tdate,"%Y-%m-%d") if tdate else TODAY
-        result["transits"]=transits(jd,lat,lng,tdt)
+        result["natal_brief"] = (western_chart(jd, lat, lng)["big_three"] if time_known
+                                 else result["summary"]["big_three"])
+        result["transits"]=transits(jd,lat,lng,target_eval_dt)
+        if not time_known:
+            result["transits"].pop("sade_sati")
+            result["transits"]["aspects_to_natal"] = [
+                hit for hit in result["transits"]["aspects_to_natal"] if hit["to_natal"] != "Moon"]
         try:
             result["transit_interpretation"]=interpret_transits(result["transits"])
         except Exception:
             pass
-        result["life_phase"]=life_phase(birth_local)
+        result["life_phase"]=life_phase(birth_utc, target_eval_dt)
         return result
 
     if mode=="synastry":
-        p=data["partner"]
-        p_utc,_=to_utc(p); jdB=julian_day(p_utc)
-        result["synastry"]=synastry(jd,jdB)
-        chA = western_chart(jd,lat,lng,time_known)
-        chB = western_chart(jdB,p.get("lat",0),p.get("lng",0),p.get("time_known",True))
+        p = partner
+        jdB = julian_day(partner_utc)
+        result["synastry"] = synastry(jd, jdB, time_known, partner_info["time_known"])
+        if not time_known or not partner_info["time_known"]:
+            big_a = (western_chart(jd, lat, lng)["big_three"] if time_known
+                     else result["summary"]["big_three"])
+            big_b = (western_chart(jdB, p.get("lat", 0), p.get("lng", 0))["big_three"]
+                     if partner_info["time_known"] else _date_only_charts(p, ("western",))[0])
+            result["_meta"].update(zodiac="tropical", house_system=None)
+            result["personA"] = {"big_three": big_a, "time_info": tinfo}
+            result["personB"] = {"big_three": big_b, "time_info": partner_info}
+            return result
+        chA = western_chart(jd,lat,lng)
+        chB = western_chart(jdB,p.get("lat",0),p.get("lng",0))
         result["personA"]={"big_three":chA["big_three"]}
         result["personB"]={"big_three":chB["big_three"]}
         # House Overlays: where A lands in B, and where B lands in A
@@ -4250,6 +4405,7 @@ def calculate_full_profile(data):
         lonsB, _, _ = body_longitudes(jdB)
         ascA = chA["ascendant"]["abs_lon"] if "abs_lon" in chA["ascendant"] else lonsA["Sun"]
         ascB = chB["ascendant"]["abs_lon"] if "abs_lon" in chB["ascendant"] else lonsB["Sun"]
+        result["_meta"].update(zodiac="tropical", house_system="whole-sign")
         result["house_overlays"] = {
             "personA_planets_in_personB_houses": synastry_house_overlays(lonsA, ascB),
             "personB_planets_in_personA_houses": synastry_house_overlays(lonsB, ascA)
@@ -4377,10 +4533,12 @@ def calculate_full_profile(data):
         return result
 
     if mode=="transit_natal_aspects":
-        tdate=data.get("transit_date")
-        tdt=datetime.strptime(tdate,"%Y-%m-%d") if tdate else TODAY
-        tjd=julian_day(tdt)
-        result["transit_natal_aspects"]=transit_to_natal_aspects(jd, tjd)
+        result["transit_natal_aspects"]=transit_to_natal_aspects(jd, target_eval_jd)
+        result["transit_natal_aspects"]["as_of_utc"] = target_eval_dt.isoformat() + "Z"
+        if not time_known:
+            details = result["transit_natal_aspects"]
+            details["transit_aspects"] = [hit for hit in details["transit_aspects"] if hit["natal_planet"] != "Moon"]
+            details["high_impact_count"] = sum(hit["impact"] == "high" for hit in details["transit_aspects"])
         return result
 
     # ── New advanced modes ─────────────────────────────────────────
@@ -4482,10 +4640,6 @@ def calculate_full_profile(data):
         from astro_advanced import shadbala_sthana_dig
         result["shadbala"] = shadbala_sthana_dig(jd, lat, lng)
         return result
-
-    # Resolve target evaluation moment dynamically for any mode (target_date / as_of / date)
-    target_eval_dt = _resolve_target_dt(data)
-    target_eval_jd = julian_day(target_eval_dt)
 
     if mode=="mundane":
         cname = data.get("country", "iran").lower()
@@ -4688,7 +4842,12 @@ def calculate_full_profile(data):
     if "bazi" in systems:
         try: result["charts"]["bazi"]=bazi_chart(jd,birth_local,data.get("gender","unknown"),lat)
         except Exception as e: result["charts"]["bazi"]={"error":repr(e)}
-    result["life_phase"]=life_phase(birth_local)
+    for tradition in ("western", "vedic"):
+        primary = result["charts"].get(tradition, {})
+        if "zodiac" in primary:
+            result["_meta"].update(zodiac=primary["zodiac"], house_system=primary["house_system"])
+            break
+    result["life_phase"]=life_phase(birth_utc, target_eval_dt)
 
     if "western" in systems and time_known:
         try:
@@ -5852,7 +6011,9 @@ def davison_chart(jdA, jdB, latA, lngA, latB, lngB, as_of_dt=None):
     if diff_lng > 180:
         mid_lng = norm180(mid_lng + 180.0)
 
-    mid_dt = datetime(2000, 1, 1) + timedelta(days=mid_jd - 2451544.5)
+    # The input clock times have minute precision. Round the Julian-day
+    # conversion to the nearest second before formatting the midpoint.
+    mid_dt = datetime(2000, 1, 1) + timedelta(seconds=round((mid_jd - 2451544.5) * 86400))
     chart = western_chart(mid_jd, mid_lat, mid_lng, time_known=True)
     chart["system"] = "Davison Time-Space Chart"
 
@@ -6987,7 +7148,8 @@ def generate_master_life_chronology(natal_jd, lat, lng, time_known=True, max_age
         if s_age <= max_age:
             milestones.append({
                 "age": s_age, "year": birth_dt.year + int(s_age),
-                "type": "Astronomical Cycle", "title": s_title,
+                "type": "Approximate age milestone", "title": s_title + " (age estimate)",
+                "timing_basis": "Typical cycle length; chart-specific transit date has not been calculated.",
                 "theme": "Structural maturation, identity consolidation, and life-course testing"
             })
 

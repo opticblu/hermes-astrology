@@ -58,14 +58,13 @@ def main():
                     version=f"hermes-astrology {_get_version()}")
     ap.add_argument("--json", help="birth data as JSON string")
     ap.add_argument("--file", help="path to birth data JSON file")
-    ap.add_argument("--mode", "-m", default="natal",
+    ap.add_argument("--mode", "-m",
                     help="chart mode (default: natal)")
     ap.add_argument("--systems", "-s", nargs="*",
-                    default=["western", "vedic", "bazi"],
                     help="systems: western vedic bazi")
     ap.add_argument("--summary", action="store_true",
                     help="short summary instead of full JSON")
-    ap.add_argument("--date", help="transit date YYYY-MM-DD")
+    ap.add_argument("--date", help="observation date for natal milestones and transits (YYYY-MM-DD, 00:00 UTC)")
     ap.add_argument("--partner", type=str,
                     help="partner birth data JSON (for synastry/compatibility)")
     a = ap.parse_args()
@@ -92,35 +91,40 @@ def main():
         print(f"error: missing required field: {e}", file=sys.stderr)
         sys.exit(2)
 
-    if a.summary:
-        _print_summary(result, data)
+    if result.get("error"):
+        print(f"error: {result['error']}", file=sys.stderr)
+        sys.exit(2)
+    if a.summary and "charts" in result:
+        _print_summary(result)
     else:
         print(json.dumps(result, indent=2, default=str))
 
 
-def _print_summary(result, data):
+def _print_summary(result):
     charts = result.get("charts", {})
-    for sys_name in data.get("systems", ["western"]):
-        ch = charts.get(sys_name)
+    for sys_name, ch in charts.items():
         if not ch:
             continue
         print(f"\n=== {sys_name.upper()} ===")
-        asc = ch.get("ascendant") or ch.get("lagna") or {}
-        print(f"  Rising: {asc.get('sign', '?')} "
-              f"{asc.get('deg_in_sign', 0):.1f}°")
+        if ch.get("zodiac"):
+            print(f"  Zodiac: {ch['zodiac']}")
+            if ch.get("house_system"):
+                print(f"  Houses: {ch['house_system']}")
+        asc = ch.get("ascendant") or ch.get("lagna")
+        if asc:
+            print(f"  Rising: {asc['sign']} {asc['deg_in_sign']:.1f}°")
         planets = ch.get("planets", {})
         if not isinstance(planets, dict):
             planets = {p.get("name", f"#{i}"): p for i, p in enumerate(planets)}
         for name, p in planets.items():
             if isinstance(p, dict):
                 ret = " ℞" if p.get("retrograde") else ""
-                house = p.get("house", p.get("bhava", ""))
-                print(f"  {name:12s} {p.get('sign', '?'):10s} "
-                      f"{p.get('degrees', p.get('deg_in_sign', 0)):.1f}°"
-                      f"  H{house}{ret}")
-    sd = result.get("summary", {})
-    if sd:
-        print(f"\n  Summary: {sd.get('text', '')}")
+                house = p.get("house", p.get("bhava"))
+                house_text = f"  H{house}" if house is not None else ""
+                degrees = p.get("degrees", p.get("deg_in_sign"))
+                degree_text = f" {degrees:.1f}°" if degrees is not None else ""
+                sign = p.get("sign") or " or ".join(p.get("possible_signs", []))
+                print(f"  {name:12s} {sign}{degree_text}{house_text}{ret}")
 
 
 if __name__ == "__main__":

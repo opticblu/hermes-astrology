@@ -6,7 +6,7 @@ clients like Claude Desktop, Cursor, Zed, Devin, and Antigravity, as well
 as cloud MCP hosts (Smithery, Cloudflare, Render) over HTTP+SSE.
 
 Requires the `mcp` SDK:
-  pip install mcp
+  pip install 'mcp>=1,<2'
 
 Transport selection via env var ASTRO_MCP_TRANSPORT:
   - stdio (default): local Claude Desktop / Cursor
@@ -25,7 +25,7 @@ from typing import Any, Sequence
 try:
     from mcp.server.fastmcp import FastMCP
 except ImportError:
-    print("ERROR: The 'mcp' package is required. Install it with: pip install mcp", file=sys.stderr)
+    print("ERROR: Install the compatible MCP SDK with: pip install 'mcp>=1,<2'", file=sys.stderr)
     sys.exit(1)
 
 # Make this script's directory importable for `import astro_engine` so the
@@ -57,20 +57,26 @@ def get_astrology_chart(
     year: int,
     month: int,
     day: int,
-    hour: int = 12,
+    hour: int | None = None,
     minute: int = 0,
     lat: float = 0.0,
     lng: float = 0.0,
     tz: str = "UTC",
-    time_known: bool = False,
+    time_known: bool | None = None,
     systems: list[str] = None,
     gender: str = None,
     mode: str = "natal",
-    transit_date: str = None
+    transit_date: str = None,
+    house_system: str = "P",
+    partner: dict[str, Any] | None = None,
 ) -> str:
     """
     Calculate an astrological chart (Western, Vedic, BaZi) based on birth data.
-    All inputs feed directly into the deterministic ephemeris engine.
+    Omit hour if birth time is unknown. For synastry, pass the second person's
+    birth date, optional clock time, location and timezone in partner.
+    For Western readings use each planet's own house and planet_element_balance
+    for ten-planet counts. Use transit_date for a dated reading and report the
+    measured orb when describing a current planetary return or opposition.
     """
     if systems is None:
         systems = ["western", "vedic", "bazi"]
@@ -84,13 +90,16 @@ def get_astrology_chart(
         "lat": lat,
         "lng": lng,
         "tz": tz,
-        "time_known": time_known,
+        "time_known": hour is not None if time_known is None else time_known,
+        "house_system": house_system,
         "systems": systems,
         "mode": mode,
     }
     
     if gender:
         params["gender"] = gender
+    if partner is not None:
+        params["partner"] = partner
     if transit_date:
         params["transit_date"] = transit_date
 
@@ -133,48 +142,6 @@ def get_astrology_reference(system: str) -> str:
         return f"Error reading reference: {e}"
 
 @mcp.tool()
-def save_profile(name: str, year: int, month: int, day: int, hour: int = 12, minute: int = 0, lat: float = 0.0, lng: float = 0.0, tz: str = "UTC") -> str:
-    """
-    Save a user's birth profile to local memory for future sessions.
-    """
-    import os, json
-    profile_path = os.path.expanduser("~/.astro_profiles.json")
-    try:
-        if os.path.exists(profile_path):
-            with open(profile_path, "r") as f:
-                profiles = json.load(f)
-        else:
-            profiles = {}
-            
-        profiles[name] = {
-            "year": year, "month": month, "day": day,
-            "hour": hour, "minute": minute,
-            "lat": lat, "lng": lng, "tz": tz
-        }
-        with open(profile_path, "w") as f:
-            json.dump(profiles, f, indent=2)
-        return f"Profile '{name}' saved successfully."
-    except Exception as e:
-        return f"Error saving profile: {e}"
-
-@mcp.tool()
-def get_profile(name: str) -> str:
-    """
-    Retrieve a saved birth profile.
-    """
-    import os, json
-    profile_path = os.path.expanduser("~/.astro_profiles.json")
-    try:
-        if os.path.exists(profile_path):
-            with open(profile_path, "r") as f:
-                profiles = json.load(f)
-            if name in profiles:
-                return json.dumps(profiles[name], indent=2)
-        return f"Profile '{name}' not found."
-    except Exception as e:
-        return f"Error loading profile: {e}"
-
-@mcp.tool()
 def geocode_city(city_name: str) -> str:
     """
     Retrieve the latitude and longitude for a given city name.
@@ -202,7 +169,7 @@ def geocode_city(city_name: str) -> str:
 
 @mcp.tool()
 def get_solar_return(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC",
     target_year: int = None
 ) -> str:
@@ -211,7 +178,7 @@ def get_solar_return(
     Essential for annual birthday forecasts and year-ahead readings.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["western"], "mode": "solar_return"}
     if target_year:
         params["target_year"] = target_year
@@ -223,7 +190,7 @@ def get_solar_return(
 
 @mcp.tool()
 def get_lunar_return(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC",
     target_year: int = None, target_month: int = None
 ) -> str:
@@ -232,7 +199,7 @@ def get_lunar_return(
     Used for monthly forecasts and emotional cycle tracking.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["western"], "mode": "lunar_return"}
     if target_year:
         params["target_year"] = target_year
@@ -246,10 +213,10 @@ def get_lunar_return(
 
 @mcp.tool()
 def get_compatibility(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC",
     partner_year: int = None, partner_month: int = None, partner_day: int = None,
-    partner_hour: int = 12, partner_minute: int = 0,
+    partner_hour: int | None = None, partner_minute: int = 0,
     partner_lat: float = 0.0, partner_lng: float = 0.0, partner_tz: str = "UTC"
 ) -> str:
     """
@@ -257,12 +224,12 @@ def get_compatibility(
     Returns overall score plus romantic, emotional, intellectual, physical, and spiritual subscores.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["western"], "mode": "compatibility",
               "partner": {"year": partner_year, "month": partner_month, "day": partner_day,
                           "hour": partner_hour, "minute": partner_minute,
                           "lat": partner_lat, "lng": partner_lng, "tz": partner_tz,
-                          "time_known": True}}
+                          "time_known": partner_hour is not None}}
     try:
         result = astro_engine.calculate_full_profile(params)
         return json.dumps(result, indent=2, default=str)
@@ -271,7 +238,7 @@ def get_compatibility(
 
 @mcp.tool()
 def get_navamsa(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC"
 ) -> str:
     """
@@ -279,7 +246,7 @@ def get_navamsa(
     Reveals soul-level strengths, relationship potential, and vargottama status.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["vedic"], "mode": "navamsa"}
     try:
         result = astro_engine.calculate_full_profile(params)
@@ -289,7 +256,7 @@ def get_navamsa(
 
 @mcp.tool()
 def get_panchang(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC"
 ) -> str:
     """
@@ -297,7 +264,7 @@ def get_panchang(
     Essential for muhurta (auspicious timing) and daily Vedic guidance.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["vedic"], "mode": "panchang"}
     try:
         result = astro_engine.calculate_full_profile(params)
@@ -353,10 +320,10 @@ def get_numerology(
 
 @mcp.tool()
 def get_composite_chart(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC",
     partner_year: int = None, partner_month: int = None, partner_day: int = None,
-    partner_hour: int = 12, partner_minute: int = 0,
+    partner_hour: int | None = None, partner_minute: int = 0,
     partner_lat: float = 0.0, partner_lng: float = 0.0, partner_tz: str = "UTC"
 ) -> str:
     """
@@ -364,12 +331,12 @@ def get_composite_chart(
     Each planet is the midpoint of its positions in both charts.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["western"], "mode": "composite",
               "partner": {"year": partner_year, "month": partner_month, "day": partner_day,
                           "hour": partner_hour, "minute": partner_minute,
                           "lat": partner_lat, "lng": partner_lng, "tz": partner_tz,
-                          "time_known": True}}
+                          "time_known": partner_hour is not None}}
     try:
         result = astro_engine.calculate_full_profile(params)
         return json.dumps(result, indent=2, default=str)
@@ -378,7 +345,7 @@ def get_composite_chart(
 
 @mcp.tool()
 def get_progressions(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC",
     target_age: int = 30
 ) -> str:
@@ -387,7 +354,7 @@ def get_progressions(
     Reveals evolving identity, emotional needs, and life direction.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["western"], "mode": "progressions", "target_age": target_age}
     try:
         result = astro_engine.calculate_full_profile(params)
@@ -397,7 +364,7 @@ def get_progressions(
 
 @mcp.tool()
 def get_planetary_return(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC",
     planet: str = "Jupiter", target_year: int = None
 ) -> str:
@@ -406,7 +373,7 @@ def get_planetary_return(
     The moment the planet returns to its natal position, beginning a new cycle.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["western"], "mode": "planetary_return",
               "planet": planet, "target_year": target_year or year + 1}
     try:
@@ -417,7 +384,7 @@ def get_planetary_return(
 
 @mcp.tool()
 def get_varga(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC",
     varga: str = "D10"
 ) -> str:
@@ -427,7 +394,7 @@ def get_varga(
     Supports D2 through D60.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["vedic"], "mode": "varga", "varga": varga}
     try:
         result = astro_engine.calculate_full_profile(params)
@@ -455,7 +422,7 @@ def get_planetary_hours(
 
 @mcp.tool()
 def get_transit_aspects(
-    year: int, month: int, day: int, hour: int = 12, minute: int = 0,
+    year: int, month: int, day: int, hour: int | None = None, minute: int = 0,
     lat: float = 0.0, lng: float = 0.0, tz: str = "UTC",
     transit_date: str = None
 ) -> str:
@@ -465,7 +432,7 @@ def get_transit_aspects(
     Defaults to today's transits.
     """
     params = {"year": year, "month": month, "day": day, "hour": hour, "minute": minute,
-              "lat": lat, "lng": lng, "tz": tz, "time_known": True,
+              "lat": lat, "lng": lng, "tz": tz, "time_known": hour is not None,
               "systems": ["western"], "mode": "transit_natal_aspects",
               "transit_date": transit_date or ""}
     try:

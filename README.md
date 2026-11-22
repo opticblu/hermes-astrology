@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Tests Passing](https://img.shields.io/badge/Tests-176%20Passed%20(100%25)-success.svg)](https://github.com/Erfix404/hermes-astrology)
+[![CI](https://github.com/opticblu/hermes-astrology/actions/workflows/ci.yml/badge.svg)](https://github.com/opticblu/hermes-astrology/actions/workflows/ci.yml)
 [![Ephemeris: NASA JPL / SwissEph](https://img.shields.io/badge/Ephemeris-JPL%20%7C%20SwissEph-purple.svg)](https://www.astro.com/swisseph/)
 
 **آستریا (Astraea) — ابرموتور قطعی و چندسنتی هوش کیهانی، آسترولوژی و پیشگویی برای هوش مصنوعی**  
@@ -60,7 +60,7 @@
 
 ### نصب و کلون مخزن
 ```bash
-git clone https://github.com/Erfix404/hermes-astrology.git
+git clone https://github.com/opticblu/hermes-astrology.git
 cd hermes-astrology
 ```
 
@@ -78,6 +78,10 @@ python scripts/astro_engine.py --json '{"mode":"crypto","asset":"BTC"}'
 # اجرای تست‌های جامع (۱۷۶ تست)
 python -m unittest discover tests
 ```
+
+### اطلاعات تولد در محیط‌های اشتراکی
+
+برای هر درخواست، اطلاعات تولد را دوباره بفرستید. در `POST /interact` فیلد `profile` در هر فراخوانی لازم است. شناسهٔ اختیاری `session_id` برای پیگیری پاسخ است. محاسبات MCP نیز برای همان درخواست انجام می‌شود. فایل‌های پروفایل نسخه‌های قبلی روی دیسک باقی می‌مانند و مدیریت آن‌ها بر عهدهٔ مالک است. برنامهٔ چت ممکن است تاریخچهٔ پیام‌های خودش را نگه دارد.
 
 ### استفاده به عنوان کتابخانه پایتون (Python API)
 ```python

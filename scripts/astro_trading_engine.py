@@ -2479,54 +2479,70 @@ class AstraeaQuantTradingAPI:
 
     @staticmethod
     def load_historical_candles(asset_key: str = "BTC") -> List[Dict[str, Any]]:
-        """Loads embedded authentic daily historical candles from real market datasets."""
+        """Read a local Coin Metrics CSV or a legacy daily candle JSON file."""
+        import csv
         import os
         import json
-        sources_dir = os.path.join(os.path.dirname(__file__), "..", "book", "trading_sources")
-        file_path_auth = os.path.join(sources_dir, f"{asset_key.lower()}_authentic_history.json")
-        file_path_daily = os.path.join(sources_dir, f"{asset_key.lower()}_daily_history.json")
-        for fp in (file_path_auth, file_path_daily):
-            if os.path.exists(fp):
-                with open(fp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if data: return data
+        from pathlib import Path
+        if not isinstance(asset_key, str) or not asset_key.isascii() or not asset_key.isalnum():
+            raise ValueError("Asset must be an alphanumeric ticker")
+        ticker = asset_key.lower()
+        sources = Path(os.environ.get("ASTRO_MARKET_DATA_DIR") or
+                       Path(__file__).resolve().parents[1] / "book" / "trading_sources")
+        for suffix in ("_authentic_history.json", "_daily_history.json"):
+            path = sources / (ticker + suffix)
+            if path.is_file():
+                with path.open(encoding="utf-8") as f:
+                    candles = json.load(f)
+                if candles:
+                    return candles
+        path = sources / (ticker + ".csv")
+        if path.is_file():
+            with path.open(encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                if not {"time", "PriceUSD"} <= set(reader.fieldnames or ()):
+                    raise ValueError("Coin Metrics CSV must contain time and PriceUSD columns")
+                return [{"date": row["time"], "close": row["PriceUSD"]}
+                        for row in reader if row["PriceUSD"]]
         return []
 
     @staticmethod
     def run_historical_backtest(asset_key: str = "BTC", initial_capital: float = 100000.0, start_year: int = 2017) -> Dict[str, Any]:
-        """Executes an authentic, deterministic astro-quant backtest over multi-year market candles.
-        Applies real planetary ephemeris (Bradley Siderograph, Lunar phases, Genesis transits)
-        and strict next-bar execution with transaction fees."""
+        """Simulate lunar signals on local daily closes with next-bar execution."""
         import astro_engine as ae
-        candles = AstraeaQuantTradingAPI.load_historical_candles(asset_key)
-        if not candles:
-            return {"error": f"No historical candle dataset found for {asset_key}"}
-
-        candles_filtered = [c for c in candles if int(c["date"].split("-")[0]) >= start_year]
-        if len(candles_filtered) < 100:
-            candles_filtered = candles
-
-        prices = [c["close"] for c in candles_filtered]
-        n_bars = len(prices)
-
-        # 20 SMA & 50 SMA Golden Trend Baseline
-        sma20 = [sum(prices[max(0, i - 20):i + 1]) / max(1, len(prices[max(0, i - 20):i + 1])) for i in range(n_bars)]
-        sma50 = [sum(prices[max(0, i - 50):i + 1]) / max(1, len(prices[max(0, i - 50):i + 1])) for i in range(n_bars)]
+        try:
+            candles = AstraeaQuantTradingAPI.load_historical_candles(asset_key)
+            if not candles:
+                return {"error": f"No historical prices for {asset_key}. Set ASTRO_MARKET_DATA_DIR "
+                                 f"to a directory containing {asset_key.lower()}.csv (time,PriceUSD)."}
+            dates, prices = [], []
+            for candle in candles:
+                dt = datetime.strptime(candle["date"], "%Y-%m-%d")
+                if dt.year < start_year:
+                    continue
+                close = float(candle["close"])
+                if not math.isfinite(close) or close <= 0 or (dates and dt <= dates[-1]):
+                    raise ValueError("Expected positive finite prices and increasing daily dates")
+                dates.append(dt)
+                prices.append(close)
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            return {"error": f"Invalid historical price data: {exc}"}
+        # First complete 50-bar signal, next-bar entry, fourteen-bar holding period.
+        if len(prices) < 65:
+            return {"error": f"At least 65 daily prices are needed from {start_year} onward"}
 
         trades_log = []
         wins = []
         losses = []
 
         # Exact Larry Williams New Moon to Full Moon 14-Day Cycle Confluence
-        for i in range(50, n_bars - 14):
-            dt_obj = datetime.strptime(candles_filtered[i]["date"], "%Y-%m-%d")
-            jd = ae.julian_day(dt_obj)
+        for i in range(49, len(prices) - 15):
+            jd = ae.julian_day(dates[i])
             lons, speeds, _ = ae.body_longitudes(jd)
             lons_p, _, _ = ae.body_longitudes(jd - 1.0)
-            p = prices[i]
 
             # Bull Market Trend: SMA 20 > SMA 50
-            is_uptrend = sma20[i] > sma50[i]
+            is_uptrend = sum(prices[i - 19:i + 1]) / 20 > sum(prices[i - 49:i + 1]) / 50
 
             # Exact New Moon Phase Crossing (Days 0 to +2)
             phase_p = (lons_p["Moon"] - lons_p["Sun"]) % 360.0
@@ -2537,13 +2553,16 @@ class AstraeaQuantTradingAPI:
             merc_direct = speeds.get("Mercury", 1.0) > 0
 
             if is_uptrend and is_new_moon_init and merc_direct:
-                c_exit = prices[i + 14] # 14-day hold from New Moon to Full Moon peak
+                entry = prices[i + 1]
+                c_exit = prices[i + 15]
                 fee = 0.0005 # 5 bps transaction cost
-                ret = (c_exit - p) / p - fee
+                ret = (c_exit - entry) / entry - fee
                 trades_log.append({
-                    "date": candles_filtered[i]["date"],
+                    "signal_date": dates[i].date().isoformat(),
+                    "date": dates[i + 1].date().isoformat(),
+                    "exit_date": dates[i + 15].date().isoformat(),
                     "type": "LONG",
-                    "entry": p,
+                    "entry": entry,
                     "exit": c_exit,
                     "return_pct": round(ret * 100.0, 2)
                 })
@@ -2552,17 +2571,17 @@ class AstraeaQuantTradingAPI:
                 elif ret < 0:
                     losses.append(abs(ret))
 
-        tot_trades = len(wins) + len(losses)
+        tot_trades = len(trades_log)
         win_rate = (len(wins) / tot_trades * 100.0) if tot_trades > 0 else 0.0
         pos_sum = sum(wins)
         neg_sum = sum(losses)
-        profit_factor = round(pos_sum / neg_sum, 2) if neg_sum > 0 else 99.0
+        profit_factor = round(pos_sum / neg_sum, 2) if neg_sum > 0 else None
         avg_gain = (pos_sum - neg_sum) / tot_trades * 100.0 if tot_trades > 0 else 0.0
 
         return {
             "asset": asset_key.upper(),
-            "backtest_period": f"{candles_filtered[0]['date']} to {candles_filtered[-1]['date']}",
-            "total_bars_evaluated": len(candles_filtered),
+            "backtest_period": f"{dates[0].date()} to {dates[-1].date()}",
+            "total_bars_evaluated": len(prices),
             "strategy_type": "Institutional Larry Williams Lunar Synodic Confluence (New Moon -> Full Moon Waxing Ride)",
             "performance_metrics": {
                 "total_curated_signals": tot_trades,
@@ -2571,11 +2590,12 @@ class AstraeaQuantTradingAPI:
                 "win_rate_percentage": f"{round(win_rate, 1)}%",
                 "profit_factor": profit_factor,
                 "average_trade_net_return": f"{round(avg_gain, 2)}%",
-                "holding_period_days": 14
+                "holding_period_bars": 14,
+                "holding_period_days": 14 if all((b - a).days == 1 for a, b in zip(dates, dates[1:])) else None
             },
             "sample_verified_trades": trades_log[-5:],
-            "verification_status": "AUDITED_AND_REPRODUCIBLE",
-            "methodology": "Strict out-of-sample execution on authentic CoinMetrics daily candles with transaction fees."
+            "verification_status": "SIMULATED",
+            "methodology": "Daily closing prices. Entry at the next close after the signal, exit 14 bars later, 5 bps total fee."
         }
 
     @staticmethod

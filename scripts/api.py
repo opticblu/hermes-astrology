@@ -5,12 +5,10 @@ Free by default. Env-driven features:
   ASTRO_API_KEY=sk_live_xxx        → gates all /chart endpoints behind API key
   ASTRO_RATE_LIMIT=100             → max requests per IP per hour (0 = unlimited)
   ASTRO_BILLING_ENABLED=true       → adds X-Tool-Price + X-Tool-Name headers
-  ASTRO_PROFILE_DIR=/data/profiles → where saved profiles are persisted (container-safe)
   ASTRO_LOG_LEVEL=INFO             → uvicorn log level
 """
 import os
 import time
-import json
 import uuid
 import logging
 import secrets
@@ -23,6 +21,7 @@ from fastapi import (
     Header,
 )
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -97,10 +96,6 @@ EXPECTED_API_KEY = os.getenv("ASTRO_API_KEY")                       # unset = fr
 RATE_LIMIT = int(os.getenv("ASTRO_RATE_LIMIT", "0"))                # 0 = unlimited
 RATE_WINDOW_SEC = int(os.getenv("ASTRO_RATE_WINDOW", "3600"))       # default 1h
 BILLING_ENABLED = True                                                # price headers always on
-PROFILE_DIR = os.getenv("ASTRO_PROFILE_DIR", os.path.expanduser("~"))
-PROFILE_PATH = os.path.join(PROFILE_DIR, ".astro_profiles.json")
-os.makedirs(PROFILE_DIR, exist_ok=True)
-
 API_KEY_NAME = "Authorization"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 
@@ -201,12 +196,13 @@ class BirthData(BaseModel):
     year: int
     month: int
     day: int
-    hour: int = 12
+    hour: Optional[int] = None
     minute: int = 0
     lat: float = 0.0
     lng: float = 0.0
     tz: str = "UTC"
-    time_known: bool = False
+    time_known: Optional[bool] = None
+    house_system: str = "P"
     systems: List[str] = None
     gender: Optional[str] = None
     mode: str = "natal"
@@ -224,28 +220,16 @@ class PartnerData(BaseModel):
     year: int
     month: int
     day: int
-    hour: int = 12
+    hour: Optional[int] = None
     minute: int = 0
     lat: float = 0.0
     lng: float = 0.0
     tz: str = "UTC"
-    time_known: bool = True
+    time_known: Optional[bool] = None
 
 
 class PartnerRequest(BirthData):
     partner: PartnerData = None
-
-
-class ProfileRequest(BaseModel):
-    name: str
-    year: int
-    month: int
-    day: int
-    hour: int = 12
-    minute: int = 0
-    lat: float = 0.0
-    lng: float = 0.0
-    tz: str = "UTC"
 
 
 class NumerologyRequest(BaseModel):
@@ -261,16 +245,10 @@ class InteractMessage(BaseModel):
 
 
 class InteractRequest(BaseModel):
-    """Chat-style interaction. The model calls this to 'poke' the engine with
-    natural-language questions and get structured chart data + grounded context.
-    Supports multi-turn via the `messages` list and an optional `profile`
-    to avoid re-passing birth data every turn."""
+    """Compute a reading from the messages and birth data supplied with this request."""
     messages: List[InteractMessage] = Field(..., min_length=1, max_length=50)
-    profile: Optional[BirthData] = Field(
-        None,
-        description="Birth data context. If omitted, the last profile for this session_id is used.",
-    )
-    session_id: Optional[str] = Field(None, description="Opaque session id. Auto-generated if absent.")
+    profile: BirthData = Field(..., description="Birth details for this request.")
+    session_id: Optional[str] = Field(None, description="Optional client correlation ID.")
     max_context_tokens: int = Field(4000, ge=500, le=16000)
 
 
@@ -282,7 +260,7 @@ TOOL_PRICING = {
     "lunar_return": "$0.03", "planetary_return": "$0.03", "navamsa": "$0.02",
     "varga": "$0.02", "panchang": "$0.02", "moon_phase": "$0.01",
     "numerology": "$0.01", "progressions": "$0.03", "planetary_hours": "$0.01",
-    "transit_natal_aspects": "$0.03", "profile": "$0.00", "geocode": "$0.00",
+    "transit_natal_aspects": "$0.03", "geocode": "$0.00",
     "reference": "$0.00", "interact": "$0.05",
 }
 
@@ -294,21 +272,21 @@ def _billing_header(mode: str):
     }
 
 
-# ── Profile session store (for /interact) ──────────────────────────────────
-_profile_sessions: dict[str, dict] = {}
-_session_lock = Lock()
-
-
 def _run(data: dict):
     if data.get("systems") is None:
         data["systems"] = ["western", "vedic", "bazi"]
     try:
-        return astro_engine.calculate_full_profile(data)
+        result = astro_engine.calculate_full_profile(data)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"Missing required field: {e}")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except Exception as e:
         log.exception("Engine error in mode=%s", data.get("mode"))
         raise HTTPException(status_code=500, detail=str(e))
+    if result.get("error"):
+        raise HTTPException(status_code=422, detail=result["error"])
+    return result
 
 
 # ── Routes ──────────────────────────────────────────────────────────────────
@@ -334,8 +312,8 @@ async def health():
         "status": "ok",
         "version": VERSION,
         "modes": 19,
-        "tools": 18,
-        "endpoints": 27,
+        "tools": len(await _mcp_mod.mcp.list_tools()) if _mcp_mod else 0,
+        "endpoints": len({route.path for route in app.routes if isinstance(route, APIRoute)}),
         "auth_required": EXPECTED_API_KEY is not None,
         "rate_limit_per_window": RATE_LIMIT or "unlimited",
         "billing": "active" if BILLING_ENABLED else "disabled",
@@ -374,7 +352,7 @@ async def metrics():
             "active_ips": len(rate_limiter.buckets),
             "uptime_sec": int(time.time() - rate_limiter.stats["since_reset"]),
         },
-        "interact_sessions": len(_profile_sessions),
+        "interact_sessions": 0,
     }
 
 
@@ -561,60 +539,6 @@ async def numerology(request: NumerologyRequest, response: Response):
     return _run(params)
 
 
-@app.post("/profile", dependencies=[Depends(get_api_key)])
-async def save_profile(request: ProfileRequest, response: Response):
-    """Save a user's birth profile to PROFILE_DIR for future sessions."""
-    try:
-        profiles = {}
-        if os.path.exists(PROFILE_PATH):
-            with open(PROFILE_PATH, "r") as f:
-                profiles = json.load(f)
-        profiles[request.name] = request.model_dump()
-        with open(PROFILE_PATH, "w") as f:
-            json.dump(profiles, f, indent=2)
-        response.headers.update(_billing_header("profile"))
-        return {"status": "success", "message": f"Profile '{request.name}' saved.", "path": PROFILE_PATH}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/profile/{name}", dependencies=[Depends(get_api_key)])
-async def load_profile(name: str, response: Response):
-    """Retrieve a saved birth profile."""
-    try:
-        if os.path.exists(PROFILE_PATH):
-            with open(PROFILE_PATH, "r") as f:
-                profiles = json.load(f)
-            if name in profiles:
-                response.headers.update(_billing_header("profile"))
-                return profiles[name]
-        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/profile/{name}", dependencies=[Depends(get_api_key)])
-async def delete_profile(name: str, response: Response):
-    """Delete a saved profile. GDPR-friendly."""
-    try:
-        if os.path.exists(PROFILE_PATH):
-            with open(PROFILE_PATH, "r") as f:
-                profiles = json.load(f)
-            if name in profiles:
-                del profiles[name]
-                with open(PROFILE_PATH, "w") as f:
-                    json.dump(profiles, f, indent=2)
-                response.headers.update(_billing_header("profile"))
-                return {"status": "deleted", "name": name}
-        raise HTTPException(status_code=404, detail=f"Profile '{name}' not found.")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/geocode", dependencies=[Depends(get_api_key)])
 async def geocode(city: str, response: Response):
     """Retrieve latitude, longitude, and timezone for a city name.
@@ -746,21 +670,6 @@ async def interact(request: InteractRequest, response: Response):
     This is the endpoint to call when a user "pokes" the agent with a
     follow-up question during a session. The model never has to guess
     positions — it interprets this structured output."""
-    # Session handling
-    session_id = request.session_id or secrets.token_urlsafe(12)
-    if request.profile is not None:
-        with _session_lock:
-            _profile_sessions[session_id] = request.profile.model_dump(exclude_none=True)
-    else:
-        with _session_lock:
-            stored = _profile_sessions.get(session_id)
-        if stored is None:
-            raise HTTPException(
-                status_code=400,
-                detail="No profile in request and no prior session found. Pass `profile` on the first call or set session_id after a profile-bearing call.",
-            )
-        request.profile = BirthData(**stored)
-
     last_user_msg = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
     if not last_user_msg:
         raise HTTPException(status_code=400, detail="At least one user message is required.")
@@ -783,7 +692,7 @@ async def interact(request: InteractRequest, response: Response):
     response.headers.update(_billing_header("interact"))
 
     return {
-        "session_id": session_id,
+        "session_id": request.session_id or secrets.token_urlsafe(12),
         "detected_mode": plan["detected_mode"],
         "rationale": plan["rationale"],
         "actions_run": [a["mode"] for a in plan["actions"]],
@@ -792,6 +701,8 @@ async def interact(request: InteractRequest, response: Response):
         "conversation_excerpt": _summarize_messages(request.messages),
         "grounding_packet": {
             "instruction": (
+                "Identify each chart's zodiac and house system where provided. When birth time "
+                "is unknown, omit time-dependent placements and report possible signs. "
                 "Interpret the structured chart data above. Do NOT invent positions, "
                 "aspects, or houses. Use the references at /reference/{system} to ground "
                 "your language. If a mode returned no usable data, say so honestly."
@@ -803,10 +714,8 @@ async def interact(request: InteractRequest, response: Response):
 
 @app.delete("/interact/{session_id}", dependencies=[Depends(get_api_key)])
 async def clear_interact_session(session_id: str):
-    """Clear an interact session. GDPR-friendly."""
-    with _session_lock:
-        existed = _profile_sessions.pop(session_id, None)
-    return {"status": "cleared" if existed else "no_such_session", "session_id": session_id}
+    """Compatibility response for clients that clear a session after a reading."""
+    return {"status": "no_such_session", "session_id": session_id}
 
 
 # ── MCP endpoints ────────────────────────────────────────────────────────────
@@ -823,7 +732,7 @@ except ModuleNotFoundError:
         _mcp_mod = None
 
 if _mcp_mod is None:
-    log.warning("mcp_server not importable — MCP endpoints disabled (pip install mcp)")
+    log.warning("MCP endpoints disabled. Install the compatible SDK with: pip install 'mcp>=1,<2'")
 else:
     _mcp_sse_app = _mcp_mod.mcp.sse_app()
     app.mount("/mcp", _mcp_sse_app)
